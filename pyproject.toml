@@ -10,10 +10,9 @@ readme = "README.md"
 authors = [
     { name = "Abdalrahman Samir", email = "abdalrahman@cancellls.com" }
 ]
-license = { text = "MIT" }
+license = "MIT"
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
     "Topic :: Software Development :: Build Tools",
@@ -28,3 +27,7 @@ agy-mem = "agy_mem:main"
 [project.urls]
 "Homepage" = "https://github.com/Cancelllls/agy-mem"
 "Bug Tracker" = "https://github.com/Cancelllls/agy-mem/issues"
+
+[tool.setuptools]
+py-modules = ["agy_mem"]
+
