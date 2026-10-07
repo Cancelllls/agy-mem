@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agy-mem"
-version = "1.0.2"
+version = "1.0.3"
 description = "Autonomous Background Memory Engine, Observation Extractor & Fast Recall System for Google Antigravity (agy)"
 readme = "README.md"
 authors = [

@@ -24,10 +24,12 @@ Tools like `claude-mem` and `antigravity-memory` attempt to solve this, but requ
 
 **`agy-mem` solves this natively:**
 1. **0 Dependencies:** Pure Python 3 standard library with native **SQLite FTS5**, column-weighted **BM25 ranking** (`title: 10x`, `concepts: 5x`, `facts: 3x`), and automatic prefix fuzzy matching (`term*`).
-2. **Auto-Project Scoping:** Automatically senses your active CWD or Git repository to prioritize and scope memories without manual flags, with automatic global fallback.
-3. **Native Trajectory Observer:** Reads directly from Antigravity's internal `brain/*/transcript.jsonl` and conversation databases. It extracts tools called, exact files modified, and assistant outcomes without burning API tokens.
-4. **Official MCP Server:** Speaks standard Model Context Protocol (JSON-RPC 2.0 stdio), exposing `search`, `recall`, `get_observations`, `timeline`, and `sync`.
-5. **Sub-50ms Latency:** Instant terminal search and prompt recall.
+2. **Stale-Aware Real-Time Auto-Sync:** Zero-touch autonomous indexing. Checks Antigravity transcript timestamps before queries and automatically indexes new turns in $< 15\text{ms}$.
+3. **Auto-Project Scoping:** Automatically senses your active CWD or Git repository to prioritize and scope memories without manual flags, with automatic global fallback.
+4. **File Decision Lineage:** Lookup all architectural decisions, bugfixes, and code changes that touched a specific file (`agy-mem file <path>`).
+5. **Portable Exporter:** Export structured Markdown briefings or JSON archives for onboarding and team sharing (`agy-mem export`).
+6. **Official MCP Server:** Speaks standard Model Context Protocol (JSON-RPC 2.0 stdio), exposing `search`, `recall`, `file_history`, `get_observations`, `timeline`, and `sync`.
+7. **Sub-50ms Latency:** Instant terminal search and prompt recall.
 
 ---
 
@@ -38,11 +40,13 @@ Tools like `claude-mem` and `antigravity-memory` attempt to solve this, but requ
 | **Language** | Node.js / TypeScript | Node.js / Webpack | **Pure Python 3** |
 | **External Dependencies** | Heavy (`npm`, `better-sqlite3`) | Heavy (`npm`, ChromaDB) | **0 (Python Standard Library)** |
 | **Install Footprint** | ~100 MB+ | ~120 MB+ | **~38 KB (Single file)** |
-| **Data Ingestion** | Manual tool calls | Claude hook / daemon | **Automatic Trajectory Observer** |
+| **Data Ingestion** | Manual tool calls | Claude hook / daemon | **Real-Time Auto-Syncing Observer** |
 | **API Cost / Quota** | Calls Gemini API for summaries | Calls Claude API | **$0 / Zero token cost** |
 | **Search Engine** | Basic SQL | Vector embeddings | **Weighted SQLite FTS5 (BM25)** |
 | **Prefix Autocomplete** | No | No | **Yes (`term*` expansion)** |
 | **Auto-Project Scoping** | No | No | **Yes (CWD & Git root detection)** |
+| **File Lineage History** | No | No | **Yes (`agy-mem file <path>`)** |
+| **Markdown / JSON Export** | No | No | **Yes (`agy-mem export`)** |
 | **MCP Compliance** | Yes | Yes | **Yes (JSON-RPC 2.0 stdio)** |
 | **Historical Backfill** | Future sessions only | Future sessions only | **Instant full-history backfill** |
 
@@ -80,10 +84,19 @@ chmod +x install.sh
 ### 1. In Any Terminal
 
 ```bash
-# Search memories (auto-scoped to current repo, or global)
+# Search memories (auto-scoped to current repo, or global with -a)
 agy-mem search "statusl"               # Prefix match e.g. statusline
 agy-mem search "offline prayer"        # Auto-scoped to current project (e.g. Aya)
 agy-mem search "offline prayer" -a     # -a / --all searches across all projects
+agy-mem search "timeout" -v            # -v / --verbose shows full diff facts & commands
+
+# Inspect file history & decision lineage
+agy-mem file offline_prayer_service.dart
+agy-mem file SilenceDetector.kt -v
+
+# Export project memory summary for documentation or team sharing
+agy-mem export -p Aya -o AYA_MEMORY.md
+agy-mem export -p Badil --format json
 
 # Recall context formatted for prompt injection
 agy-mem recall "offline barcode scanner"
@@ -99,7 +112,7 @@ agy-mem status
 # Manually store a technical observation
 agy-mem add --project Aya --type architecture --title "WAL Mode SQLite" --narrative "Enabled WAL mode and memory pragmas."
 
-# Trigger incremental sync of newly completed turns
+# Trigger full manual sync (auto-sync already runs in background)
 agy-mem sync
 ```
 
@@ -127,6 +140,7 @@ agy-mem sync
 
 Any MCP-compatible AI agent can now call:
 * `search`: Full-text memory search with BM25 scoring.
+* `file_history`: Decision and patch history for a specific file.
 * `get_observations`: Fetch complete details and diffs for observation IDs.
 * `recall`: Markdown context block formatted for immediate reasoning.
 * `timeline`: Chronological event sequence.

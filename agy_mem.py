@@ -430,8 +430,37 @@ def sync_transcripts(conn, force=False, target_session=None):
     conn.commit()
     return total_added
 
-def search_memories(conn, query, project=None, all_projects=False, obs_type=None, limit=10):
+def auto_sync_if_stale(conn):
+    """Checks recent transcripts and triggers fast incremental sync if stale (< 15ms)."""
+    if not os.path.exists(BRAIN_DIR):
+        return 0
+    try:
+        cur = conn.cursor()
+        pattern = os.path.join(BRAIN_DIR, "*", ".system_generated", "logs", "transcript.jsonl")
+        transcripts = glob.glob(pattern)
+        if not transcripts:
+            return 0
+        transcripts.sort(key=os.path.getmtime, reverse=True)
+        needs_sync = False
+        for tpath in transcripts[:5]:
+            cid = tpath.split("/")[-4]
+            mtime = os.path.getmtime(tpath)
+            cur.execute("SELECT last_mtime FROM sync_state WHERE source_id = ?;", (cid,))
+            row = cur.fetchone()
+            if not row or row[0] < mtime:
+                needs_sync = True
+                break
+        if needs_sync:
+            return sync_transcripts(conn)
+    except Exception:
+        pass
+    return 0
+
+def search_memories(conn, query, project=None, all_projects=False, obs_type=None, limit=10, verbose=False, no_sync=False):
     """Executes FTS5 query with BM25 ranking and renders high-visibility cards."""
+    if not no_sync:
+        auto_sync_if_stale(conn)
+
     cur = conn.cursor()
 
     scoped_project = project
@@ -449,7 +478,7 @@ def search_memories(conn, query, project=None, all_projects=False, obs_type=None
             sql = """
             SELECT
                 o.id, o.project, o.type, o.title, o.narrative, o.facts,
-                o.files_modified, o.created_at, o.source, o.source_id,
+                o.files_modified, o.files_read, o.created_at, o.source, o.source_id,
                 bm25(observations_fts, 10.0, 1.0, 3.0, 5.0, 1.0) as rank
             FROM observations_fts f
             JOIN observations o ON o.id = f.rowid
@@ -473,7 +502,7 @@ def search_memories(conn, query, project=None, all_projects=False, obs_type=None
 
         # Fallback to LIKE
         sql_like = """
-        SELECT id, project, type, title, narrative, facts, files_modified, created_at, source, source_id, 0.0
+        SELECT id, project, type, title, narrative, facts, files_modified, files_read, created_at, source, source_id, 0.0
         FROM observations
         WHERE (title LIKE ? OR narrative LIKE ? OR facts LIKE ?)
         """
@@ -516,7 +545,7 @@ def search_memories(conn, query, project=None, all_projects=False, obs_type=None
     print(f"\n{BOLD}{GOLD}🧠 Antigravity Memory Search:{RESET} {CYAN}\"{query}\"{RESET} ({len(rows)} results){scope_info}\n")
 
     for row in rows:
-        oid, proj, typ, title, narr, facts, fmod, created, src, src_id, rank = row
+        oid, proj, typ, title, narr, facts, fmod, fread, created, src, src_id, rank = row
 
         type_color = {
             "bugfix": RED,
@@ -531,18 +560,28 @@ def search_memories(conn, query, project=None, all_projects=False, obs_type=None
 
         print(f"  {type_color}[{typ.upper()}]{RESET} {BOLD}{title}{RESET} {GRAY}· {proj} · {date_str}{RESET}")
         if narr:
-            short_narr = narr[:180].replace("\n", " ")
-            print(f"    {LIGHT}{short_narr}...{RESET}")
+            short_narr = narr if verbose else narr[:180].replace("\n", " ") + "..."
+            print(f"    {LIGHT}{short_narr}{RESET}")
         if facts:
-            for line in facts.split("\n")[:2]:
+            bullet_limit = None if verbose else 2
+            for line in facts.split("\n")[:bullet_limit]:
                 if line.strip():
                     print(f"    {GRAY}{line.strip()}{RESET}")
-        if fmod:
-            print(f"    {TEAL}Files:{RESET} {DIM}{fmod[:100]}{RESET}")
+        if verbose:
+            if fmod:
+                print(f"    {TEAL}Files Modified:{RESET} {DIM}{fmod}{RESET}")
+            if fread:
+                print(f"    {BLUE}Files Read:{RESET} {DIM}{fread}{RESET}")
+        else:
+            if fmod:
+                print(f"    {TEAL}Files:{RESET} {DIM}{fmod[:100]}{RESET}")
         print()
 
-def recall_memories(conn, query, project=None, all_projects=False, limit=5):
+def recall_memories(conn, query, project=None, all_projects=False, limit=5, no_sync=False):
     """Outputs compact Markdown context formatted for agent prompt ingestion."""
+    if not no_sync:
+        auto_sync_if_stale(conn)
+
     cur = conn.cursor()
 
     scoped_project = project
@@ -651,7 +690,10 @@ def show_status(conn):
         bar = "■" * min(20, max(1, int((count / (total or 1)) * 20)))
         print(f"    {PURPLE}{typ:<14}{RESET} {count:>5} {GRAY}{bar}{RESET}")
 
-def show_timeline(conn, earliest=False, project=None, all_projects=False, limit=10):
+def show_timeline(conn, earliest=False, project=None, all_projects=False, limit=10, no_sync=False):
+    if not no_sync:
+        auto_sync_if_stale(conn)
+
     cur = conn.cursor()
     order = "ASC" if earliest else "DESC"
 
@@ -694,6 +736,136 @@ def show_timeline(conn, earliest=False, project=None, all_projects=False, limit=
         date_str = created.split("T")[0] if "T" in created else created[:10]
         time_str = created.split("T")[1][:8] if "T" in created else ""
         print(f"  {type_color}[{typ.upper()}]{RESET} {BOLD}{title}{RESET} {GRAY}· {proj} · {date_str} {time_str}{RESET}")
+
+def show_file_history(conn, filepath, earliest=False, limit=10, verbose=False, no_sync=False):
+    """Searches memory for all decisions, bugfixes, and actions touching a specific file."""
+    if not no_sync:
+        auto_sync_if_stale(conn)
+
+    cur = conn.cursor()
+    order = "ASC" if earliest else "DESC"
+
+    clean_path = filepath.strip().strip("'\"")
+    base = os.path.basename(clean_path)
+    pattern = f"%{clean_path}%"
+    base_pattern = f"%{base}%" if base else pattern
+
+    sql = f"""
+    SELECT id, project, type, title, created_at, files_modified, files_read, narrative, facts
+    FROM observations
+    WHERE (files_modified LIKE ? OR files_read LIKE ? OR files_modified LIKE ? OR files_read LIKE ?)
+    ORDER BY created_at_epoch {order} LIMIT ?;
+    """
+
+    cur.execute(sql, (pattern, pattern, base_pattern, base_pattern, limit))
+    rows = cur.fetchall()
+
+    if not rows:
+        print(f"\n{GRAY}No memory history found touching file:{RESET} {BOLD}{clean_path}{RESET}\n")
+        return
+
+    print(f"\n{BOLD}{GOLD}📁 Antigravity File History:{RESET} {CYAN}\"{clean_path}\"{RESET} ({len(rows)} events)\n")
+
+    for oid, proj, typ, title, created, fmod, fread, narr, facts in rows:
+        type_color = {
+            "bugfix": RED, "architecture": PURPLE, "preference": GOLD,
+            "pattern": BLUE, "milestone": GREEN, "feature": TEAL
+        }.get(typ, TEAL)
+        date_str = created.split("T")[0] if "T" in created else created[:10]
+        time_str = created.split("T")[1][:8] if "T" in created else ""
+
+        is_mod = fmod and (clean_path in fmod or base in fmod)
+        action_tag = f"{GREEN}[MODIFIED]{RESET}" if is_mod else f"{BLUE}[REFERENCED]{RESET}"
+
+        print(f"  {type_color}[{typ.upper()}]{RESET} {action_tag} {BOLD}{title}{RESET} {GRAY}· {proj} · {date_str} {time_str}{RESET}")
+        if narr:
+            short_narr = narr if verbose else narr[:180].replace("\n", " ") + "..."
+            print(f"    {LIGHT}{short_narr}{RESET}")
+        if facts:
+            bullet_limit = None if verbose else 2
+            for line in facts.split("\n")[:bullet_limit]:
+                if line.strip():
+                    print(f"    {GRAY}{line.strip()}{RESET}")
+        if verbose:
+            if fmod:
+                print(f"    {TEAL}Files Modified:{RESET} {DIM}{fmod}{RESET}")
+            if fread:
+                print(f"    {BLUE}Files Read:{RESET} {DIM}{fread}{RESET}")
+        else:
+            if fmod:
+                print(f"    {TEAL}Files:{RESET} {DIM}{fmod[:100]}{RESET}")
+        print()
+
+def export_memories(conn, project=None, output_path=None, fmt="markdown"):
+    """Exports observations to Markdown or JSON format."""
+    cur = conn.cursor()
+    sql = "SELECT id, project, type, title, narrative, facts, concepts, files_modified, files_read, created_at FROM observations"
+    params = []
+    if project:
+        sql += " WHERE project = ?"
+        params.append(project)
+    sql += " ORDER BY created_at_epoch DESC;"
+    cur.execute(sql, params)
+    rows = cur.fetchall()
+
+    if fmt == "json":
+        records = []
+        for r in rows:
+            records.append({
+                "id": r[0], "project": r[1], "type": r[2], "title": r[3],
+                "narrative": r[4], "facts": r[5], "concepts": r[6],
+                "files_modified": r[7], "files_read": r[8], "created_at": r[9]
+            })
+        out_content = json.dumps(records, indent=2)
+    else:
+        proj_title = f"Project: {project}" if project else "All Projects"
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+        lines = [
+            f"# 🧠 Antigravity Memory Summary — {proj_title}",
+            f"*Generated by agy-mem on {now_str}*\n",
+            f"**Total Records:** {len(rows)}\n",
+            "---"
+        ]
+
+        by_type = {}
+        for r in rows:
+            typ = r[2]
+            by_type.setdefault(typ, []).append(r)
+
+        type_order = ["milestone", "architecture", "bugfix", "feature", "preference", "pattern"]
+        type_labels = {
+            "milestone": "🎯 Key Milestones & Releases",
+            "architecture": "🏗️ Architecture Decisions & Schemas",
+            "bugfix": "🐛 Bug Fixes & Resolutions",
+            "feature": "✨ Features & Implementations",
+            "preference": "⚙️ Coding Standards & Preferences",
+            "pattern": "⚡ Performance & Optimization Patterns"
+        }
+
+        for typ in type_order + [t for t in by_type if t not in type_order]:
+            if typ not in by_type:
+                continue
+            lines.append(f"\n## {type_labels.get(typ, typ.capitalize())}\n")
+            for r in by_type[typ]:
+                oid, proj, t, title, narr, facts, concepts, fmod, fread, created = r
+                date_str = created[:10]
+                lines.append(f"### {title} (`{proj}` · {date_str})")
+                if narr:
+                    lines.append(f"{narr}\n")
+                if facts:
+                    lines.append(f"**Facts:**\n{facts}\n")
+                if fmod:
+                    lines.append(f"**Modified Files:** `{fmod}`\n")
+                lines.append("---")
+
+        out_content = "\n".join(lines)
+
+    if output_path:
+        with open(output_path, "w") as f:
+            f.write(out_content)
+        print(f"{GREEN}✓ Successfully exported {len(rows)} memory records to:{RESET} {BOLD}{output_path}{RESET}")
+    else:
+        print(out_content)
 RECALL_SKILL_CONTENT = """---
 name: recall
 description: >
@@ -770,6 +942,7 @@ def init_antigravity(conn):
         {"name": "get_observations", "description": "Fetch full details for observation IDs returned by search.", "parameters": {"type": "object", "properties": {"ids": {"type": "array", "items": {"type": "integer"}}}, "required": ["ids"]}},
         {"name": "recall", "description": "High-level contextual memory retrieval formatted as markdown for agent prompt reasoning.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "project": {"type": "string"}, "limit": {"type": "number"}}, "required": ["query"]}},
         {"name": "timeline", "description": "Get chronological timeline of historical milestones, decisions, and bugfixes.", "parameters": {"type": "object", "properties": {"project": {"type": "string"}, "limit": {"type": "number"}}}},
+        {"name": "file_history", "description": "Fetch historical architectural decisions, bugfixes, and modifications for a specific file path.", "parameters": {"type": "object", "properties": {"filepath": {"type": "string", "description": "File path or name e.g. lib/services/offline_prayer_service.dart"}, "limit": {"type": "number", "description": "Max events to return (default: 10)"}}, "required": ["filepath"]}},
         {"name": "add_observation", "description": "Store a new architectural decision, bugfix, or user preference into memory.", "parameters": {"type": "object", "properties": {"project": {"type": "string"}, "type": {"type": "string", "enum": ["architecture", "bugfix", "feature", "preference", "pattern"]}, "title": {"type": "string"}, "narrative": {"type": "string"}, "facts": {"type": "string"}, "concepts": {"type": "string"}}, "required": ["project", "type", "title", "narrative"]}},
         {"name": "sync", "description": "Trigger an incremental sync to extract newly created observations.", "parameters": {"type": "object", "properties": {"full": {"type": "boolean"}}}}
     ]
@@ -804,6 +977,7 @@ def init_antigravity(conn):
 def handle_tool_call(conn, name, args):
     cur = conn.cursor()
     if name == "search":
+        auto_sync_if_stale(conn)
         q = args.get("query", "").strip()
         proj = args.get("project")
         typ = args.get("type")
@@ -898,6 +1072,7 @@ def handle_tool_call(conn, name, args):
         return json.dumps(results, indent=2)
 
     elif name == "recall":
+        auto_sync_if_stale(conn)
         q = args.get("query", "").strip()
         proj = args.get("project")
         limit = int(args.get("limit", 5))
@@ -957,7 +1132,32 @@ def handle_tool_call(conn, name, args):
         out.append("</recalled_memory>")
         return "\n".join(out)
 
+    elif name == "file_history":
+        auto_sync_if_stale(conn)
+        fp = args.get("filepath", "").strip()
+        limit = int(args.get("limit", 10))
+        base = os.path.basename(fp)
+        pattern = f"%{fp}%"
+        base_pattern = f"%{base}%" if base else pattern
+        sql = """
+        SELECT id, project, type, title, created_at, files_modified, files_read, narrative, facts
+        FROM observations
+        WHERE (files_modified LIKE ? OR files_read LIKE ? OR files_modified LIKE ? OR files_read LIKE ?)
+        ORDER BY created_at_epoch DESC LIMIT ?;
+        """
+        cur.execute(sql, (pattern, pattern, base_pattern, base_pattern, limit))
+        rows = cur.fetchall()
+        results = []
+        for r in rows:
+            results.append({
+                "id": r[0], "project": r[1], "type": r[2], "title": r[3],
+                "created_at": r[4], "files_modified": r[5], "files_read": r[6],
+                "narrative": r[7], "facts": r[8]
+            })
+        return json.dumps(results, indent=2)
+
     elif name == "timeline":
+        auto_sync_if_stale(conn)
         proj = args.get("project")
         limit = int(args.get("limit", 15))
         sql = "SELECT id, project, type, title, created_at, substr(narrative, 1, 150) FROM observations"
@@ -1040,7 +1240,7 @@ def run_mcp_server(conn):
                     },
                     "serverInfo": {
                         "name": "agy-mem",
-                        "version": "1.0.2"
+                        "version": "1.0.3"
                     }
                 }
             }
@@ -1097,6 +1297,18 @@ def run_mcp_server(conn):
                             "limit": {"type": "number", "description": "Number of memory items to return (default: 5)"}
                         },
                         "required": ["query"]
+                    }
+                },
+                {
+                    "name": "file_history",
+                    "description": "Fetch historical architectural decisions, bugfixes, and modifications for a specific file path.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "filepath": {"type": "string", "description": "File path or name e.g. lib/services/offline_prayer_service.dart"},
+                            "limit": {"type": "number", "description": "Max events to return (default: 10)"}
+                        },
+                        "required": ["filepath"]
                     }
                 },
                 {
@@ -1189,6 +1401,8 @@ def main():
     search_p.add_argument("-a", "--all", action="store_true", help="Search across all projects (disable auto-scoping)")
     search_p.add_argument("-t", "--type", help="Filter by observation type (bugfix, architecture, etc.)")
     search_p.add_argument("-n", "--limit", type=int, default=10, help="Max results (default: 10)")
+    search_p.add_argument("-v", "--verbose", action="store_true", help="Show full narrative, diff facts, and executed commands")
+    search_p.add_argument("--no-sync", action="store_true", help="Bypass automatic background sync check")
 
     # recall
     recall_p = subparsers.add_parser("recall", help="Recall memory as Markdown context for agent ingestion")
@@ -1196,6 +1410,21 @@ def main():
     recall_p.add_argument("-p", "--project", help="Filter by project name")
     recall_p.add_argument("-a", "--all", action="store_true", help="Recall across all projects (disable auto-scoping)")
     recall_p.add_argument("-n", "--limit", type=int, default=5, help="Max results (default: 5)")
+    recall_p.add_argument("--no-sync", action="store_true", help="Bypass automatic background sync check")
+
+    # file
+    file_p = subparsers.add_parser("file", help="Show decision and bugfix history for a specific file")
+    file_p.add_argument("path", help="File path or filename e.g. offline_prayer_service.dart")
+    file_p.add_argument("--earliest", action="store_true", help="Start from the very first memory touching this file")
+    file_p.add_argument("-v", "--verbose", action="store_true", help="Show full diff facts and commands")
+    file_p.add_argument("-n", "--limit", type=int, default=10, help="Number of records to show")
+    file_p.add_argument("--no-sync", action="store_true", help="Bypass automatic background sync check")
+
+    # export
+    export_p = subparsers.add_parser("export", help="Export memory records to Markdown summary or JSON archive")
+    export_p.add_argument("-p", "--project", help="Filter by project name (defaults to active project or all)")
+    export_p.add_argument("-o", "--output", help="Output file path (default: stdout)")
+    export_p.add_argument("--format", choices=["markdown", "json"], default="markdown", help="Output format")
 
     # add
     add_p = subparsers.add_parser("add", help="Manually add a memory observation")
@@ -1218,6 +1447,7 @@ def main():
     timeline_p.add_argument("-p", "--project", help="Filter by project name")
     timeline_p.add_argument("-a", "--all", action="store_true", help="Show timeline across all projects (disable auto-scoping)")
     timeline_p.add_argument("-n", "--limit", type=int, default=10, help="Number of records to show")
+    timeline_p.add_argument("--no-sync", action="store_true", help="Bypass automatic background sync check")
 
     # init
     subparsers.add_parser("init", help="Hook agy-mem into Antigravity (register MCP server, install skills, run initial sync)")
@@ -1248,10 +1478,17 @@ def main():
         show_status(conn)
 
     elif args.command == "search":
-        search_memories(conn, args.query, project=args.project, all_projects=args.all, obs_type=args.type, limit=args.limit)
+        search_memories(conn, args.query, project=args.project, all_projects=args.all, obs_type=args.type, limit=args.limit, verbose=args.verbose, no_sync=args.no_sync)
 
     elif args.command == "recall":
-        recall_memories(conn, args.query, project=args.project, all_projects=args.all, limit=args.limit)
+        recall_memories(conn, args.query, project=args.project, all_projects=args.all, limit=args.limit, no_sync=args.no_sync)
+
+    elif args.command == "file":
+        show_file_history(conn, args.path, earliest=args.earliest, limit=args.limit, verbose=args.verbose, no_sync=args.no_sync)
+
+    elif args.command == "export":
+        proj = args.project or detect_cwd_project()
+        export_memories(conn, project=proj, output_path=args.output, fmt=args.format)
 
     elif args.command == "add":
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -1276,7 +1513,7 @@ def main():
         print(f"✓ Observation check complete: {added} new turns captured.")
 
     elif args.command == "timeline":
-        show_timeline(conn, earliest=args.earliest, project=args.project, all_projects=args.all, limit=args.limit)
+        show_timeline(conn, earliest=args.earliest, project=args.project, all_projects=args.all, limit=args.limit, no_sync=args.no_sync)
 
     elif args.command == "status" or not args.command:
         show_status(conn)
