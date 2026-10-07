@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agy-mem"
+version = "1.0.0"
+description = "Autonomous Background Memory Engine, Observation Extractor & Fast Recall System for Google Antigravity (agy)"
+readme = "README.md"
+authors = [
+    { name = "Abdalrahman Samir", email = "abdalrahman@cancellls.com" }
+]
+license = { text = "MIT" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence"
+]
+requires-python = ">=3.8"
+dependencies = []
+
+[project.scripts]
+agy-mem = "agy_mem:main"
+
+[project.urls]
+"Homepage" = "https://github.com/Cancellls/agy-mem"
+"Bug Tracker" = "https://github.com/Cancellls/agy-mem/issues"
