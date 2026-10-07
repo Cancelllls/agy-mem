@@ -6,6 +6,7 @@
 
 *Persistent cross-session intelligence and sub-millisecond retrieval with **zero external dependencies**.*
 
+[![PyPI version](https://img.shields.io/pypi/v/agy-mem.svg)](https://pypi.org/project/agy-mem/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8%2B-teal.svg)](https://www.python.org/)
 [![Zero Dependencies](https://img.shields.io/badge/Dependencies-0%20(Stdlib%20Only)-success.svg)]()
@@ -44,15 +45,21 @@ Tools like `claude-mem` and `antigravity-memory` attempt to solve this, but requ
 
 ---
 
-## 🚀 Quick Install (1-Liner)
+## 🚀 Installation
 
+### Option 1: Via pip (Standard Python Package)
+```bash
+pip install agy-mem
+```
+
+### Option 2: 1-Line Automated Setup (Includes MCP & Antigravity Skills)
 Install `agy-mem`, register the MCP server, and add the `/recall` & `/mem` slash commands in a single command:
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/Cancelllls/agy-mem/main/install.sh | bash
 ```
 
-### Or Clone & Install Manually
+### Option 3: Clone & Install Manually
 
 ```bash
 git clone https://github.com/Cancelllls/agy-mem.git
