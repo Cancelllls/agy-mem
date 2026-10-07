@@ -922,6 +922,9 @@ def main():
     add_p.add_argument("--facts", default="", help="Bullet points or key facts")
     add_p.add_argument("--concepts", default="", help="Comma-separated tags")
 
+    # status
+    subparsers.add_parser("status", help="Show memory database stats and health")
+
     # observe
     subparsers.add_parser("observe", help="Incremental sync on active session only")
 
