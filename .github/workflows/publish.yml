@@ -9,6 +9,9 @@ jobs:
   pypi-publish:
     name: Build and publish to PyPI
     runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/agy-mem
     permissions:
       id-token: write # Required for PyPI Trusted Publishing (OIDC)
     steps:
