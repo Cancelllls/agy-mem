@@ -42,7 +42,7 @@ PROJECT_PATTERNS = [
     (r"/Halal_Forex_Bot", "HalalForex"),
     (r"/email|cancellls\.com", "Email"),
     (r"/fun-with-kanji", "FunKanji"),
-    (r"/\.gemini|/\.agents|/\.local/bin", "Antigravity"),
+    (r"/\.gemini|/\.agents|/\.local/bin|/agy-mem|/agy-tokens", "Antigravity"),
 ]
 
 TYPE_PATTERNS = [
@@ -136,6 +136,60 @@ def detect_project(files, text=""):
         if re.search(pattern, combined, re.IGNORECASE):
             return name
     return "General"
+
+def detect_cwd_project(target_dir=None):
+    """Detects active project from current working directory or git root."""
+    cwd = os.path.abspath(target_dir or os.getcwd())
+    home = os.path.expanduser("~")
+    if cwd in ("/", home):
+        return None
+    for pattern, name in PROJECT_PATTERNS:
+        if re.search(pattern, cwd, re.IGNORECASE):
+            return name
+    # Fallback: check git root folder name
+    try:
+        cur = cwd
+        while cur and cur not in ("/", home):
+            if os.path.isdir(os.path.join(cur, ".git")):
+                base = os.path.basename(cur)
+                for pattern, name in PROJECT_PATTERNS:
+                    if re.search(pattern, base, re.IGNORECASE):
+                        return name
+                return base
+            parent = os.path.dirname(cur)
+            if parent == cur:
+                break
+            cur = parent
+    except Exception:
+        pass
+    return None
+
+def sanitize_fts_query(q):
+    """
+    Sanitizes user query for SQLite FTS5 MATCH syntax:
+    - Preserves exact quoted phrases e.g. "adhan alarm"
+    - Extracts alphanumeric and unicode words (including Arabic)
+    - Appends prefix wildcard * to tokens for instant prefix/autocomplete matching
+    - Avoids hyphen/operator syntax errors
+    """
+    q = q.strip()
+    if not q:
+        return None
+    if (q.startswith('"') and q.endswith('"')) or (q.startswith("'") and q.endswith("'")):
+        clean_inner = q[1:-1].replace('"', '""').strip()
+        return f'"{clean_inner}"' if clean_inner else None
+
+    tokens = re.findall(r'[a-zA-Z0-9_\u0600-\u06FF]+', q)
+    if not tokens:
+        return None
+
+    formatted = []
+    for t in tokens:
+        if t.endswith('*'):
+            formatted.append(f'"{t[:-1]}"*')
+        else:
+            formatted.append(f'"{t}"*')
+    return " ".join(formatted)
 
 def detect_type(text):
     text_lower = text.lower()
@@ -376,56 +430,90 @@ def sync_transcripts(conn, force=False, target_session=None):
     conn.commit()
     return total_added
 
-def search_memories(conn, query, project=None, obs_type=None, limit=10):
+def search_memories(conn, query, project=None, all_projects=False, obs_type=None, limit=10):
     """Executes FTS5 query with BM25 ranking and renders high-visibility cards."""
     cur = conn.cursor()
 
-    # Clean query for FTS5 syntax
-    sanitized = re.sub(r"[^\w\s\-]", " ", query).strip()
-    if not sanitized:
-        sanitized = query.strip()
+    scoped_project = project
+    is_autoscoped = False
+    if not scoped_project and not all_projects:
+        detected = detect_cwd_project()
+        if detected:
+            scoped_project = detected
+            is_autoscoped = True
 
-    sql = """
-    SELECT
-        o.id, o.project, o.type, o.title, o.narrative, o.facts,
-        o.files_modified, o.created_at, o.source, o.source_id,
-        bm25(observations_fts) as rank
-    FROM observations_fts f
-    JOIN observations o ON o.id = f.rowid
-    WHERE observations_fts MATCH ?
-    """
-    params = [sanitized]
+    sanitized = sanitize_fts_query(query)
 
-    if project:
-        sql += " AND o.project = ?"
-        params.append(project)
-    if obs_type:
-        sql += " AND o.type = ?"
-        params.append(obs_type)
+    def do_search(proj_filter):
+        if sanitized:
+            sql = """
+            SELECT
+                o.id, o.project, o.type, o.title, o.narrative, o.facts,
+                o.files_modified, o.created_at, o.source, o.source_id,
+                bm25(observations_fts, 10.0, 1.0, 3.0, 5.0, 1.0) as rank
+            FROM observations_fts f
+            JOIN observations o ON o.id = f.rowid
+            WHERE observations_fts MATCH ?
+            """
+            params = [sanitized]
+            if proj_filter:
+                sql += " AND o.project = ?"
+                params.append(proj_filter)
+            if obs_type:
+                sql += " AND o.type = ?"
+                params.append(obs_type)
+            sql += " ORDER BY rank ASC LIMIT ?;"
+            params.append(limit)
 
-    sql += " ORDER BY rank ASC LIMIT ?;"
-    params.append(limit)
+            try:
+                cur.execute(sql, params)
+                return cur.fetchall()
+            except sqlite3.OperationalError:
+                pass
 
-    try:
-        cur.execute(sql, params)
-        rows = cur.fetchall()
-    except sqlite3.OperationalError:
-        # Fallback to simple LIKE if MATCH syntax fails
+        # Fallback to LIKE
         sql_like = """
         SELECT id, project, type, title, narrative, facts, files_modified, created_at, source, source_id, 0.0
         FROM observations
-        WHERE title LIKE ? OR narrative LIKE ? OR facts LIKE ?
-        ORDER BY created_at_epoch DESC LIMIT ?;
+        WHERE (title LIKE ? OR narrative LIKE ? OR facts LIKE ?)
         """
         like_p = f"%{query}%"
-        cur.execute(sql_like, (like_p, like_p, like_p, limit))
-        rows = cur.fetchall()
+        params_like = [like_p, like_p, like_p]
+        if proj_filter:
+            sql_like += " AND project = ?"
+            params_like.append(proj_filter)
+        if obs_type:
+            sql_like += " AND type = ?"
+            params_like.append(obs_type)
+        sql_like += " ORDER BY created_at_epoch DESC LIMIT ?;"
+        params_like.append(limit)
+        try:
+            cur.execute(sql_like, params_like)
+            return cur.fetchall()
+        except sqlite3.OperationalError:
+            return []
+
+    rows = do_search(scoped_project)
+    fallback_used = False
+    if not rows and is_autoscoped:
+        rows = do_search(None)
+        if rows:
+            fallback_used = True
 
     if not rows:
         print(f"\n{GRAY}No memory observations found matching:{RESET} {BOLD}{query}{RESET}\n")
         return
 
-    print(f"\n{BOLD}{GOLD}🧠 Antigravity Memory Search:{RESET} {CYAN}\"{query}\"{RESET} ({len(rows)} results)\n")
+    scope_info = ""
+    if scoped_project and not fallback_used:
+        if is_autoscoped:
+            scope_info = f" {GRAY}· [Auto-scoped: {scoped_project} | use -a for all]{RESET}"
+        else:
+            scope_info = f" {GRAY}· [Project: {scoped_project}]{RESET}"
+    elif fallback_used:
+        scope_info = f" {GRAY}· [No matches in {scoped_project}, showing all projects]{RESET}"
+
+    print(f"\n{BOLD}{GOLD}🧠 Antigravity Memory Search:{RESET} {CYAN}\"{query}\"{RESET} ({len(rows)} results){scope_info}\n")
 
     for row in rows:
         oid, proj, typ, title, narr, facts, fmod, created, src, src_id, rank = row
@@ -453,30 +541,63 @@ def search_memories(conn, query, project=None, obs_type=None, limit=10):
             print(f"    {TEAL}Files:{RESET} {DIM}{fmod[:100]}{RESET}")
         print()
 
-def recall_memories(conn, query, project=None, limit=5):
+def recall_memories(conn, query, project=None, all_projects=False, limit=5):
     """Outputs compact Markdown context formatted for agent prompt ingestion."""
     cur = conn.cursor()
-    sanitized = re.sub(r"[^\w\s\-]", " ", query).strip()
 
-    sql = """
-    SELECT o.project, o.type, o.title, o.narrative, o.facts, o.files_modified, o.created_at
-    FROM observations_fts f
-    JOIN observations o ON o.id = f.rowid
-    WHERE observations_fts MATCH ?
-    """
-    params = [sanitized]
-    if project:
-        sql += " AND o.project = ?"
-        params.append(project)
+    scoped_project = project
+    is_autoscoped = False
+    if not scoped_project and not all_projects:
+        detected = detect_cwd_project()
+        if detected:
+            scoped_project = detected
+            is_autoscoped = True
 
-    sql += " ORDER BY bm25(observations_fts) ASC LIMIT ?;"
-    params.append(limit)
+    sanitized = sanitize_fts_query(query)
 
-    try:
-        cur.execute(sql, params)
-        rows = cur.fetchall()
-    except Exception:
-        rows = []
+    def do_recall(proj_filter):
+        if sanitized:
+            sql = """
+            SELECT o.project, o.type, o.title, o.narrative, o.facts, o.files_modified, o.created_at
+            FROM observations_fts f
+            JOIN observations o ON o.id = f.rowid
+            WHERE observations_fts MATCH ?
+            """
+            params = [sanitized]
+            if proj_filter:
+                sql += " AND o.project = ?"
+                params.append(proj_filter)
+
+            sql += " ORDER BY bm25(observations_fts, 10.0, 1.0, 3.0, 5.0, 1.0) ASC LIMIT ?;"
+            params.append(limit)
+
+            try:
+                cur.execute(sql, params)
+                return cur.fetchall()
+            except Exception:
+                pass
+
+        sql_like = """
+        SELECT project, type, title, narrative, facts, files_modified, created_at
+        FROM observations
+        WHERE (title LIKE ? OR narrative LIKE ? OR facts LIKE ?)
+        """
+        like_p = f"%{query}%"
+        params_like = [like_p, like_p, like_p]
+        if proj_filter:
+            sql_like += " AND project = ?"
+            params_like.append(proj_filter)
+        sql_like += " ORDER BY created_at_epoch DESC LIMIT ?;"
+        params_like.append(limit)
+        try:
+            cur.execute(sql_like, params_like)
+            return cur.fetchall()
+        except Exception:
+            return []
+
+    rows = do_recall(scoped_project)
+    if not rows and is_autoscoped:
+        rows = do_recall(None)
 
     if not rows:
         print(f"<!-- agy-mem: No prior memory found for query: {query} -->")
@@ -529,21 +650,42 @@ def show_status(conn):
     for typ, count in by_type:
         bar = "■" * min(20, max(1, int((count / (total or 1)) * 20)))
         print(f"    {PURPLE}{typ:<14}{RESET} {count:>5} {GRAY}{bar}{RESET}")
-def show_timeline(conn, earliest=False, project=None, limit=10):
+
+def show_timeline(conn, earliest=False, project=None, all_projects=False, limit=10):
     cur = conn.cursor()
     order = "ASC" if earliest else "DESC"
+
+    scoped_project = project
+    is_autoscoped = False
+    if not scoped_project and not all_projects:
+        detected = detect_cwd_project()
+        if detected:
+            scoped_project = detected
+            is_autoscoped = True
+
     sql = "SELECT id, project, type, title, created_at, substr(narrative, 1, 140) FROM observations"
     params = []
-    if project:
+    if scoped_project:
         sql += " WHERE project = ?"
-        params.append(project)
+        params.append(scoped_project)
     sql += f" ORDER BY created_at_epoch {order} LIMIT ?;"
     params.append(limit)
     cur.execute(sql, params)
     rows = cur.fetchall()
 
+    if not rows and is_autoscoped:
+        sql = f"SELECT id, project, type, title, created_at, substr(narrative, 1, 140) FROM observations ORDER BY created_at_epoch {order} LIMIT ?;"
+        cur.execute(sql, (limit,))
+        rows = cur.fetchall()
+        scoped_project = None
+        is_autoscoped = False
+
     header = "Origin / Earliest First" if earliest else "Latest First"
-    print(f"\n{BOLD}{GOLD}⏱️ Antigravity Memory Timeline ({header}):{RESET}\n")
+    scope_str = ""
+    if scoped_project:
+        scope_str = f" · Project: {scoped_project} (use -a for all)" if is_autoscoped else f" · Project: {scoped_project}"
+
+    print(f"\n{BOLD}{GOLD}⏱️ Antigravity Memory Timeline ({header}{scope_str}):{RESET}\n")
     for oid, proj, typ, title, created, snip in rows:
         type_color = {
             "bugfix": RED, "architecture": PURPLE, "preference": GOLD,
@@ -667,36 +809,52 @@ def handle_tool_call(conn, name, args):
         typ = args.get("type")
         limit = int(args.get("limit", 10))
 
-        sanitized = re.sub(r"[^\w\s\-]", " ", q).strip() or q
-        sql = """
-        SELECT o.id, o.project, o.type, o.title, o.created_at, substr(o.narrative, 1, 250), bm25(observations_fts) as rank
-        FROM observations_fts f
-        JOIN observations o ON o.id = f.rowid
-        WHERE observations_fts MATCH ?
-        """
-        params = [sanitized]
-        if proj:
-            sql += " AND o.project = ?"
-            params.append(proj)
-        if typ:
-            sql += " AND o.type = ?"
-            params.append(typ)
-        sql += " ORDER BY rank ASC LIMIT ?;"
-        params.append(limit)
+        sanitized = sanitize_fts_query(q)
+        rows = []
+        if sanitized:
+            sql = """
+            SELECT o.id, o.project, o.type, o.title, o.created_at, substr(o.narrative, 1, 250), bm25(observations_fts, 10.0, 1.0, 3.0, 5.0, 1.0) as rank
+            FROM observations_fts f
+            JOIN observations o ON o.id = f.rowid
+            WHERE observations_fts MATCH ?
+            """
+            params = [sanitized]
+            if proj:
+                sql += " AND o.project = ?"
+                params.append(proj)
+            if typ:
+                sql += " AND o.type = ?"
+                params.append(typ)
+            sql += " ORDER BY rank ASC LIMIT ?;"
+            params.append(limit)
 
-        try:
-            cur.execute(sql, params)
-            rows = cur.fetchall()
-        except Exception:
+            try:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+            except Exception:
+                rows = []
+
+        if not rows:
             sql_like = """
             SELECT id, project, type, title, created_at, substr(narrative, 1, 250), 0.0
             FROM observations
-            WHERE title LIKE ? OR narrative LIKE ?
-            ORDER BY created_at_epoch DESC LIMIT ?;
+            WHERE (title LIKE ? OR narrative LIKE ?)
             """
             p = f"%{q}%"
-            cur.execute(sql_like, (p, p, limit))
-            rows = cur.fetchall()
+            params_like = [p, p]
+            if proj:
+                sql_like += " AND project = ?"
+                params_like.append(proj)
+            if typ:
+                sql_like += " AND type = ?"
+                params_like.append(typ)
+            sql_like += " ORDER BY created_at_epoch DESC LIMIT ?;"
+            params_like.append(limit)
+            try:
+                cur.execute(sql_like, params_like)
+                rows = cur.fetchall()
+            except Exception:
+                rows = []
 
         results = []
         for r in rows:
@@ -743,24 +901,45 @@ def handle_tool_call(conn, name, args):
         q = args.get("query", "").strip()
         proj = args.get("project")
         limit = int(args.get("limit", 5))
-        sanitized = re.sub(r"[^\w\s\-]", " ", q).strip() or q
-        sql = """
-        SELECT o.project, o.type, o.title, o.narrative, o.facts, o.files_modified, o.created_at
-        FROM observations_fts f
-        JOIN observations o ON o.id = f.rowid
-        WHERE observations_fts MATCH ?
-        """
-        params = [sanitized]
-        if proj:
-            sql += " AND o.project = ?"
-            params.append(proj)
-        sql += " ORDER BY bm25(observations_fts) ASC LIMIT ?;"
-        params.append(limit)
-        try:
-            cur.execute(sql, params)
-            rows = cur.fetchall()
-        except Exception:
-            rows = []
+        sanitized = sanitize_fts_query(q)
+        rows = []
+        if sanitized:
+            sql = """
+            SELECT o.project, o.type, o.title, o.narrative, o.facts, o.files_modified, o.created_at
+            FROM observations_fts f
+            JOIN observations o ON o.id = f.rowid
+            WHERE observations_fts MATCH ?
+            """
+            params = [sanitized]
+            if proj:
+                sql += " AND o.project = ?"
+                params.append(proj)
+            sql += " ORDER BY bm25(observations_fts, 10.0, 1.0, 3.0, 5.0, 1.0) ASC LIMIT ?;"
+            params.append(limit)
+            try:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+            except Exception:
+                rows = []
+
+        if not rows:
+            sql_like = """
+            SELECT project, type, title, narrative, facts, files_modified, created_at
+            FROM observations
+            WHERE (title LIKE ? OR narrative LIKE ?)
+            """
+            p = f"%{q}%"
+            params_like = [p, p]
+            if proj:
+                sql_like += " AND project = ?"
+                params_like.append(proj)
+            sql_like += " ORDER BY created_at_epoch DESC LIMIT ?;"
+            params_like.append(limit)
+            try:
+                cur.execute(sql_like, params_like)
+                rows = cur.fetchall()
+            except Exception:
+                rows = []
 
         if not rows:
             return f"<!-- agy-mem: No prior memory found for: {q} -->"
@@ -861,7 +1040,7 @@ def run_mcp_server(conn):
                     },
                     "serverInfo": {
                         "name": "agy-mem",
-                        "version": "1.0.0"
+                        "version": "1.0.2"
                     }
                 }
             }
@@ -1007,13 +1186,15 @@ def main():
     search_p = subparsers.add_parser("search", help="Search memory observations via FTS5")
     search_p.add_argument("query", help="Search keywords or phrase")
     search_p.add_argument("-p", "--project", help="Filter by project name")
+    search_p.add_argument("-a", "--all", action="store_true", help="Search across all projects (disable auto-scoping)")
     search_p.add_argument("-t", "--type", help="Filter by observation type (bugfix, architecture, etc.)")
-    search_p.add_argument("-n", "--limit", type=int, default=8, help="Max results (default: 8)")
+    search_p.add_argument("-n", "--limit", type=int, default=10, help="Max results (default: 10)")
 
     # recall
     recall_p = subparsers.add_parser("recall", help="Recall memory as Markdown context for agent ingestion")
     recall_p.add_argument("query", help="Recall query")
     recall_p.add_argument("-p", "--project", help="Filter by project name")
+    recall_p.add_argument("-a", "--all", action="store_true", help="Recall across all projects (disable auto-scoping)")
     recall_p.add_argument("-n", "--limit", type=int, default=5, help="Max results (default: 5)")
 
     # add
@@ -1035,6 +1216,7 @@ def main():
     timeline_p = subparsers.add_parser("timeline", help="Display chronological timeline of memories")
     timeline_p.add_argument("--earliest", action="store_true", help="Start from the very first memory (oldest to newest)")
     timeline_p.add_argument("-p", "--project", help="Filter by project name")
+    timeline_p.add_argument("-a", "--all", action="store_true", help="Show timeline across all projects (disable auto-scoping)")
     timeline_p.add_argument("-n", "--limit", type=int, default=10, help="Number of records to show")
 
     # init
@@ -1066,10 +1248,10 @@ def main():
         show_status(conn)
 
     elif args.command == "search":
-        search_memories(conn, args.query, project=args.project, obs_type=args.type, limit=args.limit)
+        search_memories(conn, args.query, project=args.project, all_projects=args.all, obs_type=args.type, limit=args.limit)
 
     elif args.command == "recall":
-        recall_memories(conn, args.query, project=args.project, limit=args.limit)
+        recall_memories(conn, args.query, project=args.project, all_projects=args.all, limit=args.limit)
 
     elif args.command == "add":
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -1094,7 +1276,7 @@ def main():
         print(f"✓ Observation check complete: {added} new turns captured.")
 
     elif args.command == "timeline":
-        show_timeline(conn, earliest=args.earliest, project=args.project, limit=args.limit)
+        show_timeline(conn, earliest=args.earliest, project=args.project, all_projects=args.all, limit=args.limit)
 
     elif args.command == "status" or not args.command:
         show_status(conn)

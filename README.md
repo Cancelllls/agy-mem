@@ -23,10 +23,11 @@ When working with AI coding agents like **Google Antigravity (`agy`)**, starting
 Tools like `claude-mem` and `antigravity-memory` attempt to solve this, but require heavy Node.js runtimes, hundreds of megabytes of `node_modules`, and external API keys to pay for AI summarizations.
 
 **`agy-mem` solves this natively:**
-1. **0 Dependencies:** Pure Python 3 standard library with native **SQLite FTS5** and BM25 ranking.
-2. **Native Trajectory Observer:** Reads directly from Antigravity's internal `brain/*/transcript.jsonl` and conversation databases. It extracts tools called, exact files modified, and assistant outcomes without burning API tokens.
-3. **Official MCP Server:** Speaks standard Model Context Protocol (JSON-RPC 2.0 stdio), exposing `search`, `recall`, `get_observations`, `timeline`, and `sync`.
-4. **Sub-50ms Latency:** Instant terminal search and prompt recall.
+1. **0 Dependencies:** Pure Python 3 standard library with native **SQLite FTS5**, column-weighted **BM25 ranking** (`title: 10x`, `concepts: 5x`, `facts: 3x`), and automatic prefix fuzzy matching (`term*`).
+2. **Auto-Project Scoping:** Automatically senses your active CWD or Git repository to prioritize and scope memories without manual flags, with automatic global fallback.
+3. **Native Trajectory Observer:** Reads directly from Antigravity's internal `brain/*/transcript.jsonl` and conversation databases. It extracts tools called, exact files modified, and assistant outcomes without burning API tokens.
+4. **Official MCP Server:** Speaks standard Model Context Protocol (JSON-RPC 2.0 stdio), exposing `search`, `recall`, `get_observations`, `timeline`, and `sync`.
+5. **Sub-50ms Latency:** Instant terminal search and prompt recall.
 
 ---
 
@@ -36,10 +37,12 @@ Tools like `claude-mem` and `antigravity-memory` attempt to solve this, but requ
 | :--- | :--- | :--- | :--- |
 | **Language** | Node.js / TypeScript | Node.js / Webpack | **Pure Python 3** |
 | **External Dependencies** | Heavy (`npm`, `better-sqlite3`) | Heavy (`npm`, ChromaDB) | **0 (Python Standard Library)** |
-| **Install Footprint** | ~100 MB+ | ~120 MB+ | **~35 KB (Single file)** |
+| **Install Footprint** | ~100 MB+ | ~120 MB+ | **~38 KB (Single file)** |
 | **Data Ingestion** | Manual tool calls | Claude hook / daemon | **Automatic Trajectory Observer** |
 | **API Cost / Quota** | Calls Gemini API for summaries | Calls Claude API | **$0 / Zero token cost** |
-| **Search Engine** | Basic SQL | Vector embeddings | **SQLite FTS5 with BM25** |
+| **Search Engine** | Basic SQL | Vector embeddings | **Weighted SQLite FTS5 (BM25)** |
+| **Prefix Autocomplete** | No | No | **Yes (`term*` expansion)** |
+| **Auto-Project Scoping** | No | No | **Yes (CWD & Git root detection)** |
 | **MCP Compliance** | Yes | Yes | **Yes (JSON-RPC 2.0 stdio)** |
 | **Historical Backfill** | Future sessions only | Future sessions only | **Instant full-history backfill** |
 
@@ -50,7 +53,9 @@ Tools like `claude-mem` and `antigravity-memory` attempt to solve this, but requ
 ### Option 1: Via pip (Standard Python Package)
 ```bash
 pip install agy-mem
+agy-mem init
 ```
+*(Running `agy-mem init` registers the MCP server in `~/.gemini/config/mcp_config.json`, generates schemas, and configures `/recall` and `/mem` slash commands).*
 
 ### Option 2: 1-Line Automated Setup (Includes MCP & Antigravity Skills)
 Install `agy-mem`, register the MCP server, and add the `/recall` & `/mem` slash commands in a single command:
@@ -75,15 +80,17 @@ chmod +x install.sh
 ### 1. In Any Terminal
 
 ```bash
-# Search memories with high-visibility formatted cards
-agy-mem search "fiqh zakat"
-agy-mem search "statusline timeout" -p Antigravity
+# Search memories (auto-scoped to current repo, or global)
+agy-mem search "statusl"               # Prefix match e.g. statusline
+agy-mem search "offline prayer"        # Auto-scoped to current project (e.g. Aya)
+agy-mem search "offline prayer" -a     # -a / --all searches across all projects
 
 # Recall context formatted for prompt injection
 agy-mem recall "offline barcode scanner"
 
-# View chronological timeline (latest first, or origin first)
+# View chronological timeline (auto-scoped to current repo, or global with -a)
 agy-mem timeline --limit 5
+agy-mem timeline -a --limit 5
 agy-mem timeline --earliest --limit 3
 
 # Check database health & breakdown by project
