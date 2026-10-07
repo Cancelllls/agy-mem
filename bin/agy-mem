@@ -552,9 +552,112 @@ def show_timeline(conn, earliest=False, project=None, limit=10):
         date_str = created.split("T")[0] if "T" in created else created[:10]
         time_str = created.split("T")[1][:8] if "T" in created else ""
         print(f"  {type_color}[{typ.upper()}]{RESET} {BOLD}{title}{RESET} {GRAY}· {proj} · {date_str} {time_str}{RESET}")
-        if snip:
-            print(f"    {LIGHT}{snip.strip().replace(chr(10), ' ')}...{RESET}")
-        print()
+RECALL_SKILL_CONTENT = """---
+name: recall
+description: >
+  Retrieves historical architectural decisions, bugfixes, user preferences,
+  and code patterns across all sessions and projects using agy-mem.
+  Trigger: /recall, /mem.
+---
+
+# /recall & /mem
+
+Searches and retrieves past memory observations from the local SQLite FTS5 database (~/.gemini/antigravity-cli/memory.db).
+
+### Usage
+- For human-readable search cards:
+  agy-mem search "<query>"
+- To inject past context into agent prompt:
+  agy-mem recall "<query>"
+- To view chronological timeline:
+  agy-mem timeline
+"""
+
+MEM_SKILL_CONTENT = """---
+name: mem
+description: >
+  Autonomous memory engine commands: search past sessions, view memory stats,
+  or trigger sync using agy-mem. Trigger: /mem.
+---
+
+# /mem
+
+Interact with the Antigravity Memory Engine (agy-mem):
+
+- agy-mem search "<query>"
+- agy-mem status
+- agy-mem timeline
+- agy-mem sync
+"""
+
+def init_antigravity(conn):
+    """Automatically hooks agy-mem into Antigravity after pip install."""
+    print(f"\n{BOLD}{GOLD}🧠 Initializing agy-mem for Google Antigravity...{RESET}\n")
+
+    # 1. Register MCP Server
+    mcp_config_path = os.path.expanduser("~/.gemini/config/mcp_config.json")
+    os.makedirs(os.path.dirname(mcp_config_path), exist_ok=True)
+    data = {"mcpServers": {}}
+    if os.path.exists(mcp_config_path):
+        try:
+            with open(mcp_config_path, "r") as f:
+                data = json.load(f)
+        except Exception:
+            pass
+    if "mcpServers" not in data:
+        data["mcpServers"] = {}
+
+    bin_path = os.path.expanduser("~/.local/bin/agy-mem")
+    import shutil
+    if not os.path.exists(bin_path):
+        bin_path = shutil.which("agy-mem") or sys.executable + " -m agy_mem"
+
+    data["mcpServers"]["agy-mem"] = {
+        "command": bin_path,
+        "args": ["mcp"]
+    }
+    with open(mcp_config_path, "w") as f:
+        json.dump(data, f, indent=2)
+    print(f"  {GREEN}✓{RESET} Registered MCP Server in: {BOLD}{mcp_config_path}{RESET}")
+
+    # 2. Generate cached MCP tool schemas
+    schema_dir = os.path.expanduser("~/.gemini/antigravity-cli/mcp/agy-mem")
+    os.makedirs(schema_dir, exist_ok=True)
+    schemas = [
+        {"name": "search", "description": "Search memory observations using full-text search with BM25 ranking.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "project": {"type": "string"}, "type": {"type": "string"}, "limit": {"type": "number"}}, "required": ["query"]}},
+        {"name": "get_observations", "description": "Fetch full details for observation IDs returned by search.", "parameters": {"type": "object", "properties": {"ids": {"type": "array", "items": {"type": "integer"}}}, "required": ["ids"]}},
+        {"name": "recall", "description": "High-level contextual memory retrieval formatted as markdown for agent prompt reasoning.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "project": {"type": "string"}, "limit": {"type": "number"}}, "required": ["query"]}},
+        {"name": "timeline", "description": "Get chronological timeline of historical milestones, decisions, and bugfixes.", "parameters": {"type": "object", "properties": {"project": {"type": "string"}, "limit": {"type": "number"}}}},
+        {"name": "add_observation", "description": "Store a new architectural decision, bugfix, or user preference into memory.", "parameters": {"type": "object", "properties": {"project": {"type": "string"}, "type": {"type": "string", "enum": ["architecture", "bugfix", "feature", "preference", "pattern"]}, "title": {"type": "string"}, "narrative": {"type": "string"}, "facts": {"type": "string"}, "concepts": {"type": "string"}}, "required": ["project", "type", "title", "narrative"]}},
+        {"name": "sync", "description": "Trigger an incremental sync to extract newly created observations.", "parameters": {"type": "object", "properties": {"full": {"type": "boolean"}}}}
+    ]
+    for s in schemas:
+        with open(os.path.join(schema_dir, f"{s['name']}.json"), "w") as f:
+            json.dump(s, f, indent=2)
+    print(f"  {GREEN}✓{RESET} Generated MCP schemas in: {BOLD}{schema_dir}{RESET}")
+
+    # 3. Install Antigravity Skills (/recall & /mem)
+    skills_dir = os.path.expanduser("~/.agent/skills")
+    recall_dir = os.path.join(skills_dir, "recall")
+    mem_dir = os.path.join(skills_dir, "mem")
+    os.makedirs(recall_dir, exist_ok=True)
+    os.makedirs(mem_dir, exist_ok=True)
+
+    with open(os.path.join(recall_dir, "SKILL.md"), "w") as f:
+        f.write(RECALL_SKILL_CONTENT)
+    with open(os.path.join(mem_dir, "SKILL.md"), "w") as f:
+        f.write(MEM_SKILL_CONTENT)
+    print(f"  {GREEN}✓{RESET} Installed skills: {BOLD}/recall{RESET} and {BOLD}/mem{RESET} in {skills_dir}")
+
+    # 4. Run Initial Sync
+    print(f"\n{TEAL}Running initial memory backfill across existing sessions...{RESET}")
+    docs = sync_markdown_docs(conn)
+    trans = sync_transcripts(conn)
+    print(f"  {GREEN}✓{RESET} Backfilled: {docs} documentation sections, {trans} conversation observations.")
+
+    print(f"\n{BOLD}{GREEN}✓ agy-mem is now fully connected to Antigravity!{RESET}")
+    print(f"  • Run in terminal: {CYAN}agy-mem search \"<query>\"{RESET} or {CYAN}agy-mem timeline{RESET}")
+    print(f"  • Use in chat:     {BOLD}/recall <topic>{RESET} or {BOLD}/mem{RESET}\n")
 
 def handle_tool_call(conn, name, args):
     cur = conn.cursor()
@@ -934,6 +1037,9 @@ def main():
     timeline_p.add_argument("-p", "--project", help="Filter by project name")
     timeline_p.add_argument("-n", "--limit", type=int, default=10, help="Number of records to show")
 
+    # init
+    subparsers.add_parser("init", help="Hook agy-mem into Antigravity (register MCP server, install skills, run initial sync)")
+
     # mcp
     subparsers.add_parser("mcp", help="Run stdio JSON-RPC MCP server for Antigravity & Claude")
 
@@ -942,6 +1048,10 @@ def main():
     os.makedirs(DB_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     init_db(conn)
+
+    if args.command == "init":
+        init_antigravity(conn)
+        return
 
     if args.command == "mcp":
         run_mcp_server(conn)

@@ -1,0 +1,9 @@
+LICENSE
+README.md
+agy_mem.py
+pyproject.toml
+agy_mem.egg-info/PKG-INFO
+agy_mem.egg-info/SOURCES.txt
+agy_mem.egg-info/dependency_links.txt
+agy_mem.egg-info/entry_points.txt
+agy_mem.egg-info/top_level.txt
