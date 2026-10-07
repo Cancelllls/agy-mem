@@ -37,7 +37,7 @@ if [ -f "${SCRIPT_DIR}/bin/agy-mem" ]; then
     cp "${SCRIPT_DIR}/bin/agy-mem" "${TARGET}"
 else
     # Fallback to downloading directly if run via curl | bash
-    curl -sSL "https://raw.githubusercontent.com/Cancellls/agy-mem/main/bin/agy-mem" -o "${TARGET}"
+    curl -sSL "https://raw.githubusercontent.com/Cancelllls/agy-mem/main/bin/agy-mem" -o "${TARGET}"
 fi
 
 chmod +x "${TARGET}"
@@ -51,8 +51,8 @@ if [ -d "${SCRIPT_DIR}/skills" ]; then
     cp "${SCRIPT_DIR}/skills/recall/SKILL.md" "${SKILLS_DIR}/recall/SKILL.md"
     cp "${SCRIPT_DIR}/skills/mem/SKILL.md" "${SKILLS_DIR}/mem/SKILL.md"
 else
-    curl -sSL "https://raw.githubusercontent.com/Cancellls/agy-mem/main/skills/recall/SKILL.md" -o "${SKILLS_DIR}/recall/SKILL.md"
-    curl -sSL "https://raw.githubusercontent.com/Cancellls/agy-mem/main/skills/mem/SKILL.md" -o "${SKILLS_DIR}/mem/SKILL.md"
+    curl -sSL "https://raw.githubusercontent.com/Cancelllls/agy-mem/main/skills/recall/SKILL.md" -o "${SKILLS_DIR}/recall/SKILL.md"
+    curl -sSL "https://raw.githubusercontent.com/Cancelllls/agy-mem/main/skills/mem/SKILL.md" -o "${SKILLS_DIR}/mem/SKILL.md"
 fi
 echo -e "  ${GREEN}✓${RESET} Registered skills: ${BOLD}/recall${RESET} and ${BOLD}/mem${RESET} in ${SKILLS_DIR}"
 

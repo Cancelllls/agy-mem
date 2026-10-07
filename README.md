@@ -49,13 +49,13 @@ Tools like `claude-mem` and `antigravity-memory` attempt to solve this, but requ
 Install `agy-mem`, register the MCP server, and add the `/recall` & `/mem` slash commands in a single command:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Cancellls/agy-mem/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/Cancelllls/agy-mem/main/install.sh | bash
 ```
 
 ### Or Clone & Install Manually
 
 ```bash
-git clone https://github.com/Cancellls/agy-mem.git
+git clone https://github.com/Cancelllls/agy-mem.git
 cd agy-mem
 chmod +x install.sh
 ./install.sh

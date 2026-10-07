@@ -26,5 +26,5 @@ dependencies = []
 agy-mem = "agy_mem:main"
 
 [project.urls]
-"Homepage" = "https://github.com/Cancellls/agy-mem"
-"Bug Tracker" = "https://github.com/Cancellls/agy-mem/issues"
+"Homepage" = "https://github.com/Cancelllls/agy-mem"
+"Bug Tracker" = "https://github.com/Cancelllls/agy-mem/issues"
