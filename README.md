@@ -7,6 +7,7 @@
 *Persistent cross-session intelligence and sub-millisecond retrieval with **zero external dependencies**.*
 
 [![PyPI version](https://img.shields.io/pypi/v/agy-mem.svg)](https://pypi.org/project/agy-mem/)
+[![PyPI Downloads](https://img.shields.io/pypi/dm/agy-mem?color=blue&label=downloads)](https://pypistats.org/packages/agy-mem)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8%2B-teal.svg)](https://www.python.org/)
 [![Zero Dependencies](https://img.shields.io/badge/Dependencies-0%20(Stdlib%20Only)-success.svg)]()
